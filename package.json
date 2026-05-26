@@ -45,10 +45,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/joyssine/node-mysql-api.git"
+    "url": "git+https://github.com/shankaulitz/angular-21-boilerplate"
   },
   "bugs": {
-    "url": "https://github.com/joyssine/node-mysql-api/issues"
+    "url": "https://github.com/shankaulitz/angular-21-boilerplate/issues"
   },
-  "homepage": "https://github.com/joyssine/node-mysql-api#readme"
+  "homepage": "https://github.com/shankaulitz/angular-21-boilerplate/blob/main/README.md"
 }
