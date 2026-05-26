@@ -1,0 +1,318 @@
+import dotenv from 'dotenv';
+dotenv.config();
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
+import { Op } from 'sequelize';
+
+import sendEmail from '../_helpers/send-email';
+import db from '../_helpers/db';
+import Role from '../_helpers/role';
+
+export default {
+    authenticate,
+    refreshToken,
+    revokeToken,
+    register,
+    verifyEmail,
+    forgotPassword,
+    validateResetToken,
+    resetPassword,
+    getAll,
+    getById,
+    create,
+    update,
+    delete: _delete
+};
+
+// 🔐 AUTHENTICATE
+async function authenticate({ email, password, ipAddress }: any) {
+    const account = await db.Account.scope('withHash').findOne({ where: { email } });
+
+    if (!account || !account.isVerified || !(await bcrypt.compare(password, account.passwordHash))) {
+        throw 'Email or password is incorrect';
+    }
+
+    const jwtToken = generateJwtToken(account);
+    const refreshToken = generateRefreshToken(account, ipAddress);
+
+    await refreshToken.save();
+
+    return {
+        ...basicDetails(account),
+        jwtToken,
+        refreshToken: refreshToken.token
+    };
+}
+
+// 🔄 REFRESH TOKEN
+async function refreshToken({ token, ipAddress }: any) {
+    const refreshToken = await getRefreshToken(token);
+    const account = await refreshToken.getAccount();
+
+    const newRefreshToken = generateRefreshToken(account, ipAddress);
+
+    refreshToken.revoked = Date.now();
+    refreshToken.revokedByIp = ipAddress;
+    refreshToken.replacedByToken = newRefreshToken.token;
+
+    await refreshToken.save();
+    await newRefreshToken.save();
+
+    const jwtToken = generateJwtToken(account);
+
+    return {
+        ...basicDetails(account),
+        jwtToken,
+        refreshToken: newRefreshToken.token
+    };
+}
+
+// 🚫 REVOKE TOKEN
+async function revokeToken({ token, ipAddress }: any) {
+    const refreshToken = await getRefreshToken(token);
+
+    refreshToken.revoked = Date.now();
+    refreshToken.revokedByIp = ipAddress;
+
+    await refreshToken.save();
+}
+
+// 📝 REGISTER
+async function register(params: any, origin: any) {
+    if (await db.Account.findOne({ where: { email: params.email } })) {
+        return await sendAlreadyRegisteredEmail(params.email, origin);
+    }
+
+    const account = new db.Account(params);
+
+    const isFirstAccount = (await db.Account.count()) === 0;
+    account.role = isFirstAccount ? Role.Admin : Role.User;
+    account.verificationToken = randomTokenString();
+
+    account.passwordHash = await hash(params.password);
+
+    await account.save();
+
+    await sendVerificationEmail(account, origin);
+}
+
+// ✅ VERIFY EMAIL
+async function verifyEmail({ token }: any) {
+    const account = await db.Account.findOne({ where: { verificationToken: token } });
+
+    if (!account) throw 'Verification failed';
+
+    account.verified = Date.now();
+    account.verificationToken = null;
+
+    await account.save();
+}
+
+// 🔑 FORGOT PASSWORD
+async function forgotPassword({ email }: any, origin: any) {
+    const account = await db.Account.findOne({ where: { email } });
+    if (!account) return;
+
+    account.resetToken = randomTokenString();
+    account.resetTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await account.save();
+
+    await sendPasswordResetEmail(account, origin);
+}
+
+// 🔍 VALIDATE RESET TOKEN
+async function validateResetToken({ token }: any) {
+    const account = await db.Account.findOne({
+        where: {
+            resetToken: token,
+            resetTokenExpires: { [Op.gt]: Date.now() }
+        }
+    });
+
+    if (!account) throw 'Invalid token';
+
+    return account;
+}
+
+// 🔁 RESET PASSWORD
+async function resetPassword({ token, password }: any) {
+    const account = await validateResetToken({ token });
+
+    account.passwordHash = await hash(password);
+    account.passwordReset = Date.now();
+    account.resetToken = null;
+
+    await account.save();
+}
+
+// 📋 GET ALL
+async function getAll() {
+    const accounts = await db.Account.findAll();
+    return accounts.map((x: any) => basicDetails(x));
+}
+
+// 🔍 GET BY ID
+async function getById(id: any) {
+    const account = await getAccount(id);
+    return basicDetails(account);
+}
+
+// ➕ CREATE
+async function create(params: any) {
+    if (await db.Account.findOne({ where: { email: params.email } })) {
+        throw `Email "${params.email}" is already registered`;
+    }
+
+    const account = new db.Account(params);
+    account.verified = Date.now();
+    account.passwordHash = await hash(params.password);
+
+    await account.save();
+
+    return basicDetails(account);
+}
+
+// ✏️ UPDATE
+async function update(id: any, params: any) {
+    const account = await getAccount(id);
+
+    if (params.email && account.email !== params.email &&
+        await db.Account.findOne({ where: { email: params.email } })) {
+        throw `Email "${params.email}" is already taken`;
+    }
+
+    if (params.password) {
+        params.passwordHash = await hash(params.password);
+    }
+
+    Object.assign(account, params);
+    account.updated = Date.now();
+
+    await account.save();
+
+    return basicDetails(account);
+}
+
+// ❌ DELETE
+async function _delete(id: any) {
+    const account = await getAccount(id);
+    await account.destroy();
+}
+
+// 🔎 HELPERS
+
+async function getAccount(id: any) {
+    const account = await db.Account.findByPk(id);
+    if (!account) throw 'Account not found';
+    return account;
+}
+
+async function getRefreshToken(token: any) {
+    const refreshToken = await db.RefreshToken.findOne({ where: { token } });
+    if (!refreshToken || !refreshToken.isActive) throw 'Invalid token';
+    return refreshToken;
+}
+
+async function hash(password: any) {
+    return await bcrypt.hash(password, 10);
+}
+
+function generateJwtToken(account: any) {
+
+    const secret = process.env.APP_SECRET as string;
+
+    return jwt.sign(
+        { sub: account.id, id: account.id },
+        secret,
+        { expiresIn: '15m' }
+    );
+}
+
+function generateRefreshToken(account: any, ipAddress: any) {
+    return new db.RefreshToken({
+        accountId: account.id,
+        token: randomTokenString(),
+        expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        createdByIp: ipAddress
+    });
+}
+
+function randomTokenString() {
+    return crypto.randomBytes(40).toString('hex');
+}
+
+function basicDetails(account: any) {
+    const { id, title, firstName, lastName, email, role, created, updated, isVerified } = account;
+    return { id, title, firstName, lastName, email, role, created, updated, isVerified };
+}
+
+async function sendVerificationEmail(account: any, origin: any) {
+    let message;
+
+    if (origin) {
+        const verifyUrl = `${origin}/account/verify-email?token=${account.verificationToken}`;
+        message = `
+            <p>Please click the link below to verify your email address:</p>
+            <p><a href="${verifyUrl}">${verifyUrl}</a></p>
+        `;
+    } else {
+        message = `
+            <p>Please use the token below to verify your email:</p>
+            <p>${account.verificationToken}</p>
+        `;
+    }
+
+    await sendEmail({
+        to: account.email,
+        subject: 'Verify Email',
+        html: `<h4>Verify Email</h4>${message}`
+    });
+}
+
+async function sendAlreadyRegisteredEmail(email: any, origin: any) {
+    let message;
+
+    if (origin) {
+        const resetUrl = `${origin}/account/forgot-password`;
+        message = `
+            <p>If you don't know your password, please visit:</p>
+            <p><a href="${resetUrl}">${resetUrl}</a></p>
+        `;
+    } else {
+        message = `
+            <p>If you don't know your password, you can reset it.</p>
+        `;
+    }
+
+    await sendEmail({
+        to: email,
+        subject: 'Already Registered',
+        html: `<h4>Email already registered</h4>${message}`
+    });
+}
+
+
+async function sendPasswordResetEmail(account: any, origin: any) {
+    let message;
+
+    if (origin) {
+        const resetUrl = `${origin}/account/reset-password?token=${account.resetToken}`;
+        message = `
+            <p>Please click the link below to reset your password:</p>
+            <p><a href="${resetUrl}">${resetUrl}</a></p>
+        `;
+    } else {
+        message = `
+            <p>Please use the token below to reset your password:</p>
+            <p>${account.resetToken}</p>
+        `;
+    }
+
+    await sendEmail({
+        to: account.email,
+        subject: 'Reset Password',
+        html: `<h4>Reset Password</h4>${message}`
+    });
+}

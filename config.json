@@ -1,0 +1,23 @@
+{
+  "database": {
+    "host": "",
+    "port": "",
+    "user": "",
+    "password": "",
+    "database": ""
+  },
+
+  "secret": "",
+
+  "emailFrom": "",
+
+  "smtpOptions": {
+    "host": "",
+    "port": "",
+
+    "auth": {
+      "user": "",
+      "pass": ""
+    }
+  }
+}
